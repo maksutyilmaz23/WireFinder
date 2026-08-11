@@ -48,3 +48,13 @@ Kullanım:
 5. Haritadaki sürekli turuncu/kırmızı çizgiler manyetik alan anomalisi bölgelerini gösterir.
 
 Bu uygulama elektrik kablosunu kesin olarak tespit etmez.
+
+## v4 — Otomatik Konum Takibi
+- Yatay/Dikey yön seçimi kaldırıldı
+- Telefonun hareketi ivmeölçer (linear acceleration) ve rotasyon vektörü sensörleriyle otomatik izlenir
+- Basit bir "sıfır hız güncellemesi" (ZUPT) ile sapma (drift) azaltılır
+- Harita, toplanan noktaların kapladığı alana göre otomatik ölçeklenir
+
+Not: Bu konum takibi GPS değildir, ivmeölçer tabanlı bir tahmindir (dead reckoning).
+Uzun taramalarda sapma birikebilir; telefonu yavaş ve düzenli hareket ettirmek, gerekirse
+taramayı kısa tutup yeniden başlatmak doğruluğu artırır.

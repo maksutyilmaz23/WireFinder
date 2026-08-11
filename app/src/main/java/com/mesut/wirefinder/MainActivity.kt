@@ -15,13 +15,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
-import kotlin.math.sqrt
 import kotlin.math.abs
+import kotlin.math.sqrt
 
 class MainActivity : ComponentActivity(), SensorEventListener {
     private lateinit var sensorManager: SensorManager
     private var magnetometer: Sensor? = null
+    private var linearAccel: Sensor? = null
+    private var rotationVector: Sensor? = null
 
+    // --- Manyetik alan durumu ---
     private var _x by mutableStateOf(0f)
     private var _y by mutableStateOf(0f)
     private var _z by mutableStateOf(0f)
@@ -29,29 +32,46 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private var _baseline by mutableStateOf<Float?>(null)
     private var _delta by mutableStateOf(0f)
     private var _anomaly by mutableStateOf(false)
-
     private val samples = mutableStateListOf<Float>()
+
+    // --- Konum takibi (ivmeölçer + rotasyon vektörü ile dead-reckoning) ---
+    private val rotationMatrix = FloatArray(9)
+    private var hasRotation = false
+    private var lastAccelTimestampNs = 0L
+    private var velX = 0f
+    private var velY = 0f
+    private var posX = 0f
+    private var posY = 0f
+    private val accelMagWindow = ArrayDeque<Float>()
+    private var stillSince = 0L
+    private var trackingSupported = true
+
     private val scanPoints = mutableStateListOf<ScanPoint>()
     private var scanning by mutableStateOf(false)
-    private var scanMin = 0f
-    private var scanMax = 100f
-    private var scanDirection = ScanDirection.HORIZONTAL
-    private var scanProgress = 0f
-    private var scanLine = 0f
+    private var scanPointCount by mutableStateOf(0)
+    private var scanElapsedMs by mutableStateOf(0L)
+    private var scanStartMs = 0L
+    private var scanMinX = 0f
+    private var scanMaxX = 0f
+    private var scanMinY = 0f
+    private var scanMaxY = 0f
     private var scanPeak = 0f
 
-    enum class ScanDirection { HORIZONTAL, VERTICAL }
     data class ScanPoint(val x: Float, val y: Float, val intensity: Float)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
         magnetometer = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
+        linearAccel = sensorManager.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
+        rotationVector = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
+        trackingSupported = linearAccel != null && rotationVector != null
 
         setContent {
             MaterialTheme {
                 WireFinderScreen(
                     supported = magnetometer != null,
+                    trackingSupported = trackingSupported,
                     x = _x, y = _y, z = _z,
                     field = _field,
                     baseline = _baseline,
@@ -60,20 +80,25 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     samples = samples,
                     scanning = scanning,
                     scanPoints = scanPoints,
-                    scanDirection = scanDirection,
-                    scanProgress = scanProgress,
+                    scanPointCount = scanPointCount,
+                    scanElapsedMs = scanElapsedMs,
                     scanPeak = scanPeak,
-                    scanMax = scanMax,
-                    onDirectionChange = { scanDirection = it },
+                    scanMinX = scanMinX, scanMaxX = scanMaxX,
+                    scanMinY = scanMinY, scanMaxY = scanMaxY,
                     onCalibrate = { _baseline = if (_field > 0f) _field else null },
                     onStartScan = {
                         scanPoints.clear()
                         scanning = true
-                        scanMin = 0f
-                        scanMax = 100f
-                        scanProgress = 0f
-                        scanLine = 0f
+                        scanPointCount = 0
+                        scanStartMs = System.currentTimeMillis()
+                        scanElapsedMs = 0L
                         scanPeak = 0f
+                        // Konum takibini bu noktadan sıfırla
+                        velX = 0f; velY = 0f; posX = 0f; posY = 0f
+                        scanMinX = 0f; scanMaxX = 0f; scanMinY = 0f; scanMaxY = 0f
+                        accelMagWindow.clear()
+                        stillSince = 0L
+                        lastAccelTimestampNs = 0L
                     },
                     onStopScan = { scanning = false },
                     onReset = {
@@ -82,6 +107,8 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                         scanPoints.clear()
                         scanning = false
                         _anomaly = false
+                        velX = 0f; velY = 0f; posX = 0f; posY = 0f
+                        scanPeak = 0f
                     }
                 )
             }
@@ -90,9 +117,9 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
     override fun onResume() {
         super.onResume()
-        magnetometer?.let {
-            sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME)
-        }
+        magnetometer?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
+        linearAccel?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
+        rotationVector?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
     }
 
     override fun onPause() {
@@ -101,42 +128,92 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     }
 
     override fun onSensorChanged(event: SensorEvent) {
-        if (event.sensor.type != Sensor.TYPE_MAGNETIC_FIELD) return
+        when (event.sensor.type) {
+            Sensor.TYPE_MAGNETIC_FIELD -> handleMagnetometer(event)
+            Sensor.TYPE_ROTATION_VECTOR -> handleRotationVector(event)
+            Sensor.TYPE_LINEAR_ACCELERATION -> handleLinearAcceleration(event)
+        }
+    }
 
+    private fun handleMagnetometer(event: SensorEvent) {
         val x = event.values[0]
         val y = event.values[1]
         val z = event.values[2]
-        val b = sqrt(x*x + y*y + z*z)
+        val b = sqrt(x * x + y * y + z * z)
 
         _x = x; _y = y; _z = z; _field = b
 
         val base = _baseline
+        var intensity = 0f
         if (base != null) {
             _delta = abs(b - base)
-            // Heuristic only: a magnetic anomaly, not proof of a wire.
+            // Sezgisel bir eşik: kesin kablo kanıtı değildir.
             _anomaly = _delta >= 15f
+            intensity = _delta
         }
 
         samples.add(b)
         if (samples.size > 100) samples.removeAt(0)
 
         if (scanning && base != null) {
-            val intensity = abs(b - base)
-            scanMin = minOf(scanMin, intensity)
-            scanMax = maxOf(scanMax, intensity, 1f)
-            // A simple time-ordered path. The user moves the phone across the wall.
             scanPeak = maxOf(scanPeak, intensity)
-            val i = scanPoints.size
-            val width = 120f
-            val lines = 12f
-            val along = (i % width) / (width - 1f)
-            val line = ((i / width) % lines) / (lines - 1f)
-            val xPos = if (scanDirection == ScanDirection.HORIZONTAL) along * 119f else line * 119f
-            val yPos = if (scanDirection == ScanDirection.HORIZONTAL) line * 5.99f else along * 5.99f
-            scanProgress = (i % width) / (width - 1f)
-            scanPoints.add(ScanPoint(xPos, yPos, intensity))
+            scanPointCount = scanPoints.size + 1
+            scanElapsedMs = System.currentTimeMillis() - scanStartMs
+            scanPoints.add(ScanPoint(posX, posY, intensity))
+            if (posX < scanMinX) scanMinX = posX
+            if (posX > scanMaxX) scanMaxX = posX
+            if (posY < scanMinY) scanMinY = posY
+            if (posY > scanMaxY) scanMaxY = posY
             if (scanPoints.size > 1440) scanPoints.removeAt(0)
         }
+    }
+
+    private fun handleRotationVector(event: SensorEvent) {
+        SensorManager.getRotationMatrixFromVector(rotationMatrix, event.values)
+        hasRotation = true
+    }
+
+    // İvmeölçer + rotasyon verisini çift entegre ederek göreli konum (posX, posY) hesaplar.
+    // Not: Bu bir "dead reckoning" tahminidir, GPS değildir; zamanla sapma (drift) birikir.
+    // Basit bir "sıfır hız güncellemesi" (ZUPT) sapmayı azaltmak için kullanılır.
+    private fun handleLinearAcceleration(event: SensorEvent) {
+        if (!hasRotation || !scanning) {
+            lastAccelTimestampNs = event.timestamp
+            return
+        }
+        if (lastAccelTimestampNs == 0L) {
+            lastAccelTimestampNs = event.timestamp
+            return
+        }
+        val dt = (event.timestamp - lastAccelTimestampNs) / 1_000_000_000f
+        lastAccelTimestampNs = event.timestamp
+        if (dt <= 0f || dt > 0.5f) return
+
+        // Cihaz eksenindeki ivmeyi dünya eksenine (Doğu-Kuzey-Yukarı) çevir.
+        val ax = rotationMatrix[0] * event.values[0] + rotationMatrix[1] * event.values[1] + rotationMatrix[2] * event.values[2]
+        val ay = rotationMatrix[3] * event.values[0] + rotationMatrix[4] * event.values[1] + rotationMatrix[5] * event.values[2]
+
+        val accelMag = sqrt(ax * ax + ay * ay)
+        accelMagWindow.addLast(accelMag)
+        if (accelMagWindow.size > 12) accelMagWindow.removeFirst()
+
+        val nowNs = event.timestamp
+        val avgMag = accelMagWindow.average().toFloat()
+        if (avgMag < 0.12f) {
+            if (stillSince == 0L) stillSince = nowNs
+            // ~250ms boyunca hareketsizse hızı sıfırla (sapma birikimini önler)
+            if ((nowNs - stillSince) > 250_000_000L) {
+                velX = 0f
+                velY = 0f
+            }
+        } else {
+            stillSince = 0L
+        }
+
+        velX += ax * dt
+        velY += ay * dt
+        posX += velX * dt
+        posY += velY * dt
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
@@ -146,6 +223,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 @Composable
 private fun WireFinderScreen(
     supported: Boolean,
+    trackingSupported: Boolean,
     x: Float, y: Float, z: Float,
     field: Float,
     baseline: Float?,
@@ -154,11 +232,11 @@ private fun WireFinderScreen(
     samples: List<Float>,
     scanning: Boolean,
     scanPoints: List<MainActivity.ScanPoint>,
-    scanDirection: MainActivity.ScanDirection,
-    scanProgress: Float,
+    scanPointCount: Int,
+    scanElapsedMs: Long,
     scanPeak: Float,
-    scanMax: Float,
-    onDirectionChange: (MainActivity.ScanDirection) -> Unit,
+    scanMinX: Float, scanMaxX: Float,
+    scanMinY: Float, scanMaxY: Float,
     onCalibrate: () -> Unit,
     onStartScan: () -> Unit,
     onStopScan: () -> Unit,
@@ -174,6 +252,14 @@ private fun WireFinderScreen(
             if (!supported) {
                 Text("Bu cihazda manyetometre bulunamadı.", color = MaterialTheme.colorScheme.error)
                 return@Column
+            }
+            if (!trackingSupported) {
+                Text(
+                    "Bu cihazda konum takibi için gereken sensörler (ivmeölçer/rotasyon) bulunamadı. " +
+                        "Harita otomatik konumlandırılamayacak.",
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall
+                )
             }
 
             Text("Manyetik Alan", style = MaterialTheme.typography.titleMedium)
@@ -192,20 +278,6 @@ private fun WireFinderScreen(
                 Text("Duvar taramasından önce duvardan uzakta referans alın.")
             }
 
-            Text("Tarama yönü", style = MaterialTheme.typography.titleSmall)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(
-                    selected = scanDirection == MainActivity.ScanDirection.HORIZONTAL,
-                    onClick = { onDirectionChange(MainActivity.ScanDirection.HORIZONTAL) },
-                    label = { Text("Yatay") }
-                )
-                FilterChip(
-                    selected = scanDirection == MainActivity.ScanDirection.VERTICAL,
-                    onClick = { onDirectionChange(MainActivity.ScanDirection.VERTICAL) },
-                    label = { Text("Dikey") }
-                )
-            }
-
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = onCalibrate) { Text("Referans Al") }
                 if (!scanning) {
@@ -221,22 +293,31 @@ private fun WireFinderScreen(
             Text("Canlı Manyetik Grafik", style = MaterialTheme.typography.titleMedium)
             MagneticGraph(samples, Modifier.fillMaxWidth().height(120.dp))
 
-            Text("Duvar Tarama Haritası", style = MaterialTheme.typography.titleMedium)
-            WallScanMap(scanPoints, scanMin = 0f, scanMax = scanMax,
-                Modifier.fillMaxWidth().height(240.dp))
-
-            LinearProgressIndicator(
-                progress = { scanProgress.coerceIn(0f, 1f) },
-                modifier = Modifier.fillMaxWidth()
+            Text("Duvar Tarama Haritası (otomatik konum)", style = MaterialTheme.typography.titleMedium)
+            WallScanMap(
+                scanPoints,
+                minX = scanMinX, maxX = scanMaxX,
+                minY = scanMinY, maxY = scanMaxY,
+                modifier = Modifier.fillMaxWidth().height(240.dp)
             )
-            Text("Tarama ilerlemesi: ${(scanProgress * 100).toInt()}%")
+
+            Text("Toplanan nokta: $scanPointCount   Süre: ${scanElapsedMs / 1000}s")
             Text("Tarama boyunca en yüksek değişim: ${String.format("%.2f", scanPeak)} µT")
 
             Text(
                 if (scanning)
-                    "Telefonu duvar üzerinde yavaşça yatay veya dikey hareket ettirin. Kırmızı bölgeler daha güçlü manyetik anomalileri gösterir."
+                    "Telefonu duvar üzerinde yavaşça, sabit mesafede gezdirin. Yön seçmenize gerek yok; " +
+                        "uygulama hareketinizi ivmeölçer ve rotasyon sensörüyle otomatik izler. Kırmızı bölgeler " +
+                        "daha güçlü manyetik anomalileri gösterir."
                 else
                     "Önce Referans Al'a basın, sonra Duvarı Tara ile taramayı başlatın.",
+                style = MaterialTheme.typography.bodySmall
+            )
+
+            Text(
+                "NOT: Konum takibi GPS değildir; ivmeölçer tabanlı bir tahmindir ve uzun taramalarda sapma " +
+                    "(drift) birikebilir. Sapmayı azaltmak için telefonu yavaş ve düzenli hareket ettirin, " +
+                    "gerekirse taramayı kısa tutup 'Sıfırla' ile yeniden başlayın.",
                 style = MaterialTheme.typography.bodySmall
             )
 
@@ -269,12 +350,11 @@ private fun StatusCard(anomaly: Boolean) {
 @Composable
 private fun WallScanMap(
     points: List<MainActivity.ScanPoint>,
-    scanMin: Float,
-    scanMax: Float,
+    minX: Float, maxX: Float,
+    minY: Float, maxY: Float,
     modifier: Modifier = Modifier
 ) {
     Canvas(modifier) {
-        // Wall grid
         val cols = 12
         val rows = 8
         for (c in 0..cols) {
@@ -288,14 +368,21 @@ private fun WallScanMap(
 
         if (points.isEmpty()) return@Canvas
 
-        val maxX = 119f
-        val maxY = 5.99f
-        val range = (scanMax - scanMin).coerceAtLeast(1f)
+        // Toplanan konumlara göre otomatik ölçekleme; en az 0.3m aralık varsay (bölme hatasını önler)
+        val rangeX = (maxX - minX).coerceAtLeast(0.3f)
+        val rangeY = (maxY - minY).coerceAtLeast(0.3f)
+        val intensities = points.map { it.intensity }
+        val iMin = intensities.minOrNull() ?: 0f
+        val iRange = ((intensities.maxOrNull() ?: 1f) - iMin).coerceAtLeast(1f)
 
+        // Merkezi koru: harita alanının %90'ını kullan, kenarda boşluk bırak
+        val margin = 0.05f
         points.forEach { p ->
-            val px = (p.x / maxX) * size.width
-            val py = ((p.y / maxY).coerceIn(0f, 1f)) * size.height
-            val n = ((p.intensity - scanMin) / range).coerceIn(0f, 1f)
+            val nx = ((p.x - minX) / rangeX)
+            val ny = ((p.y - minY) / rangeY)
+            val px = (margin + nx * (1f - 2 * margin)) * size.width
+            val py = (margin + ny * (1f - 2 * margin)) * size.height
+            val n = ((p.intensity - iMin) / iRange).coerceIn(0f, 1f)
 
             val color = when {
                 n >= 0.75f -> Color.Red
