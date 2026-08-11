@@ -63,6 +63,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     scanDirection = scanDirection,
                     scanProgress = scanProgress,
                     scanPeak = scanPeak,
+                    scanMax = scanMax,
                     onDirectionChange = { scanDirection = it },
                     onCalibrate = { _baseline = if (_field > 0f) _field else null },
                     onStartScan = {
@@ -141,6 +142,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 }
 
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 private fun WireFinderScreen(
     supported: Boolean,
@@ -155,6 +157,7 @@ private fun WireFinderScreen(
     scanDirection: MainActivity.ScanDirection,
     scanProgress: Float,
     scanPeak: Float,
+    scanMax: Float,
     onDirectionChange: (MainActivity.ScanDirection) -> Unit,
     onCalibrate: () -> Unit,
     onStartScan: () -> Unit,
