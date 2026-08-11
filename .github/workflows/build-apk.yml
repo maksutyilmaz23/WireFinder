@@ -57,3 +57,16 @@ jobs:
         with:
           name: WireFinder-debug-apk
           path: app/build/outputs/apk/debug/*.apk
+
+      - name: Publish APK to apk-output branch
+        if: steps.build.outcome == 'success'
+        run: |
+          git config user.email "ci@example.com"
+          git config user.name "CI Bot"
+          apk_path=$(ls app/build/outputs/apk/debug/*.apk | head -n1)
+          git checkout --orphan apk-output
+          git rm -rf . >/dev/null 2>&1 || true
+          cp "$apk_path" ./WireFinder-debug.apk
+          git add WireFinder-debug.apk
+          git commit -m "apk build $(date -u +%Y%m%dT%H%M%SZ)"
+          git push -f origin apk-output
