@@ -5,6 +5,9 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -24,9 +27,32 @@ jobs:
           gradle-version: '8.9'
 
       - name: Build debug APK
-        run: gradle assembleDebug --no-daemon
+        id: build
+        run: gradle assembleDebug --no-daemon --stacktrace > /tmp/build.log 2>&1
+        continue-on-error: true
+
+      - name: Show log tail
+        if: always()
+        run: tail -n 300 /tmp/build.log
+
+      - name: Publish log on failure
+        if: steps.build.outcome == 'failure'
+        run: |
+          git config user.email "ci@example.com"
+          git config user.name "CI Bot"
+          git checkout --orphan build-logs
+          git rm -rf . >/dev/null 2>&1 || true
+          cp /tmp/build.log ./build.log
+          git add build.log
+          git commit -m "build log $(date -u +%Y%m%dT%H%M%SZ)"
+          git push -f origin build-logs
+
+      - name: Fail job if build failed
+        if: steps.build.outcome == 'failure'
+        run: exit 1
 
       - name: Upload APK artifact
+        if: steps.build.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: WireFinder-debug-apk
