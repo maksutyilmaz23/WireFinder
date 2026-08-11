@@ -14,6 +14,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.dp
 import kotlin.math.abs
 import kotlin.math.sqrt
@@ -347,6 +349,33 @@ private fun StatusCard(anomaly: Boolean) {
     }
 }
 
+private fun heatColor(t: Float): Color {
+    // Sürekli renk skalası: koyu yeşil -> sarı -> turuncu -> kırmızı
+    val stops = listOf(
+        0.00f to Color(0xFF2E7D32),
+        0.35f to Color(0xFFC0CA33),
+        0.65f to Color(0xFFFF9800),
+        1.00f to Color(0xFFD32F2F)
+    )
+    val clamped = t.coerceIn(0f, 1f)
+    var lo = stops.first()
+    var hi = stops.last()
+    for (i in 0 until stops.size - 1) {
+        if (clamped >= stops[i].first && clamped <= stops[i + 1].first) {
+            lo = stops[i]; hi = stops[i + 1]
+            break
+        }
+    }
+    val span = (hi.first - lo.first).coerceAtLeast(0.0001f)
+    val f = ((clamped - lo.first) / span).coerceIn(0f, 1f)
+    return Color(
+        red = lo.second.red + (hi.second.red - lo.second.red) * f,
+        green = lo.second.green + (hi.second.green - lo.second.green) * f,
+        blue = lo.second.blue + (hi.second.blue - lo.second.blue) * f,
+        alpha = 1f
+    )
+}
+
 @Composable
 private fun WallScanMap(
     points: List<MainActivity.ScanPoint>,
@@ -377,20 +406,42 @@ private fun WallScanMap(
 
         // Merkezi koru: harita alanının %90'ını kullan, kenarda boşluk bırak
         val margin = 0.05f
-        points.forEach { p ->
-            val nx = ((p.x - minX) / rangeX)
-            val ny = ((p.y - minY) / rangeY)
+        fun toOffset(p: MainActivity.ScanPoint): Offset {
+            val nx = (p.x - minX) / rangeX
+            val ny = (p.y - minY) / rangeY
             val px = (margin + nx * (1f - 2 * margin)) * size.width
             val py = (margin + ny * (1f - 2 * margin)) * size.height
+            return Offset(px, py)
+        }
+        fun colorFor(p: MainActivity.ScanPoint): Color {
             val n = ((p.intensity - iMin) / iRange).coerceIn(0f, 1f)
+            return heatColor(n)
+        }
 
-            val color = when {
-                n >= 0.75f -> Color.Red
-                n >= 0.50f -> Color(0xFFFF9800)
-                n >= 0.25f -> Color.Yellow
-                else -> Color(0xFF66BB6A)
-            }
-            drawCircle(color = color, radius = 7f, center = Offset(px, py))
+        // Telefonu gezdirdiğiniz rotayı, o andaki manyetik değişime göre renklendirilmiş
+        // kalın bir iz olarak çiz — böylece duvarın hangi bölgesinden geçildiği ve
+        // orada ölçülen değer birlikte görünür.
+        val trailWidth = 22f
+        for (i in 1 until points.size) {
+            val prev = points[i - 1]
+            val cur = points[i]
+            drawLine(
+                color = colorFor(cur),
+                start = toOffset(prev),
+                end = toOffset(cur),
+                strokeWidth = trailWidth,
+                cap = StrokeCap.Round
+            )
+        }
+
+        // Başlangıç noktasını mavi bir işaretle, en son (güncel) konumu beyaz halkayla vurgula
+        if (points.isNotEmpty()) {
+            drawCircle(color = Color(0xFF1565C0), radius = trailWidth * 0.5f, center = toOffset(points.first()))
+        }
+        if (points.size > 1) {
+            val last = toOffset(points.last())
+            drawCircle(color = Color.White, radius = trailWidth * 0.55f, center = last, style = Stroke(width = 4f))
+            drawCircle(color = colorFor(points.last()), radius = trailWidth * 0.4f, center = last)
         }
     }
 }
