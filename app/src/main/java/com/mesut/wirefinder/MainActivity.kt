@@ -38,14 +38,16 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private var _anomaly by mutableStateOf(false)
     private val samples = mutableStateListOf<Float>()
 
-    // --- Konum takibi (ivmeölçer + rotasyon vektörü ile dead-reckoning) ---
+    // --- Konum takibi (ivmeölçer + rotasyon vektörü ile dead-reckoning, XYZ) ---
     private val rotationMatrix = FloatArray(9)
     private var hasRotation = false
     private var lastAccelTimestampNs = 0L
     private var velX = 0f
     private var velY = 0f
+    private var velZ = 0f
     private var posX = 0f
     private var posY = 0f
+    private var posZ = 0f
     private val accelMagWindow = ArrayDeque<Float>()
     private var stillSince = 0L
     private var trackingSupported = true
@@ -59,9 +61,11 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private var scanMaxX by mutableStateOf(0f)
     private var scanMinY by mutableStateOf(0f)
     private var scanMaxY by mutableStateOf(0f)
+    private var scanMinZ by mutableStateOf(0f)
+    private var scanMaxZ by mutableStateOf(0f)
     private var scanPeak by mutableStateOf(0f)
 
-    data class ScanPoint(val x: Float, val y: Float, val intensity: Float)
+    data class ScanPoint(val x: Float, val y: Float, val z: Float, val intensity: Float)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -89,6 +93,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     scanPeak = scanPeak,
                     scanMinX = scanMinX, scanMaxX = scanMaxX,
                     scanMinY = scanMinY, scanMaxY = scanMaxY,
+                    scanMinZ = scanMinZ, scanMaxZ = scanMaxZ,
                     onCalibrate = { _baseline = if (_field > 0f) _field else null },
                     onStartScan = {
                         scanPoints.clear()
@@ -98,8 +103,9 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                         scanElapsedMs = 0L
                         scanPeak = 0f
                         // Konum takibini bu noktadan sıfırla
-                        velX = 0f; velY = 0f; posX = 0f; posY = 0f
+                        velX = 0f; velY = 0f; velZ = 0f; posX = 0f; posY = 0f; posZ = 0f
                         scanMinX = 0f; scanMaxX = 0f; scanMinY = 0f; scanMaxY = 0f
+                        scanMinZ = 0f; scanMaxZ = 0f
                         accelMagWindow.clear()
                         stillSince = 0L
                         lastAccelTimestampNs = 0L
@@ -111,7 +117,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                         scanPoints.clear()
                         scanning = false
                         _anomaly = false
-                        velX = 0f; velY = 0f; posX = 0f; posY = 0f
+                        velX = 0f; velY = 0f; velZ = 0f; posX = 0f; posY = 0f; posZ = 0f
                         scanPeak = 0f
                     }
                 )
@@ -163,15 +169,17 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         samples.add(b)
         if (samples.size > 100) samples.removeAt(0)
 
-        if (scanning && base != null && posX.isFinite() && posY.isFinite()) {
+        if (scanning && base != null && posX.isFinite() && posY.isFinite() && posZ.isFinite()) {
             scanPeak = maxOf(scanPeak, intensity)
             scanPointCount = scanPoints.size + 1
             scanElapsedMs = System.currentTimeMillis() - scanStartMs
-            scanPoints.add(ScanPoint(posX, posY, intensity))
+            scanPoints.add(ScanPoint(posX, posY, posZ, intensity))
             if (posX < scanMinX) scanMinX = posX
             if (posX > scanMaxX) scanMaxX = posX
             if (posY < scanMinY) scanMinY = posY
             if (posY > scanMaxY) scanMaxY = posY
+            if (posZ < scanMinZ) scanMinZ = posZ
+            if (posZ > scanMaxZ) scanMaxZ = posZ
             if (scanPoints.size > 1440) scanPoints.removeAt(0)
         }
     }
@@ -200,10 +208,11 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         // Cihaz eksenindeki ivmeyi dünya eksenine (Doğu-Kuzey-Yukarı) çevir.
         val ax = rotationMatrix[0] * event.values[0] + rotationMatrix[1] * event.values[1] + rotationMatrix[2] * event.values[2]
         val ay = rotationMatrix[3] * event.values[0] + rotationMatrix[4] * event.values[1] + rotationMatrix[5] * event.values[2]
+        val az = rotationMatrix[6] * event.values[0] + rotationMatrix[7] * event.values[1] + rotationMatrix[8] * event.values[2]
 
-        if (!ax.isFinite() || !ay.isFinite()) return
+        if (!ax.isFinite() || !ay.isFinite() || !az.isFinite()) return
 
-        val accelMag = sqrt(ax * ax + ay * ay)
+        val accelMag = sqrt(ax * ax + ay * ay + az * az)
         accelMagWindow.addLast(accelMag)
         if (accelMagWindow.size > 12) accelMagWindow.removeFirst()
 
@@ -215,6 +224,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             if ((nowNs - stillSince) > 250_000_000L) {
                 velX = 0f
                 velY = 0f
+                velZ = 0f
             }
         } else {
             stillSince = 0L
@@ -222,13 +232,17 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
         velX += ax * dt
         velY += ay * dt
+        velZ += az * dt
         posX += velX * dt
         posY += velY * dt
+        posZ += velZ * dt
 
         // Savunma: herhangi bir sayısal bozulma (NaN/sonsuz) konum takibini kalıcı olarak
         // bozmasın diye anında sıfırlanır.
-        if (!posX.isFinite() || !posY.isFinite() || !velX.isFinite() || !velY.isFinite()) {
-            posX = 0f; posY = 0f; velX = 0f; velY = 0f
+        if (!posX.isFinite() || !posY.isFinite() || !posZ.isFinite() ||
+            !velX.isFinite() || !velY.isFinite() || !velZ.isFinite()
+        ) {
+            posX = 0f; posY = 0f; posZ = 0f; velX = 0f; velY = 0f; velZ = 0f
         }
     }
 
@@ -253,6 +267,7 @@ private fun WireFinderScreen(
     scanPeak: Float,
     scanMinX: Float, scanMaxX: Float,
     scanMinY: Float, scanMaxY: Float,
+    scanMinZ: Float, scanMaxZ: Float,
     onCalibrate: () -> Unit,
     onStartScan: () -> Unit,
     onStopScan: () -> Unit,
@@ -309,17 +324,20 @@ private fun WireFinderScreen(
             Text("Canlı Manyetik Grafik", style = MaterialTheme.typography.titleMedium)
             MagneticGraph(samples, Modifier.fillMaxWidth().height(120.dp))
 
-            Text("Duvar Tarama Haritası (otomatik konum)", style = MaterialTheme.typography.titleMedium)
-            WallScanMap(
+            Text("Duvar Tarama Haritası — XYZ düzlemi (otomatik konum)", style = MaterialTheme.typography.titleMedium)
+            Scan3DMap(
                 scanPoints,
                 minX = scanMinX, maxX = scanMaxX,
                 minY = scanMinY, maxY = scanMaxY,
-                modifier = Modifier.fillMaxWidth().height(240.dp)
+                minZ = scanMinZ, maxZ = scanMaxZ,
+                modifier = Modifier.fillMaxWidth().height(260.dp)
             )
             val spanX = scanMaxX - scanMinX
             val spanY = scanMaxY - scanMinY
+            val spanZ = scanMaxZ - scanMinZ
             Text(
-                "Taranan alan (yaklaşık): ${String.format("%.2f", spanX)} m × ${String.format("%.2f", spanY)} m",
+                "Taranan hacim (yaklaşık): X ${String.format("%.2f", spanX)} m · " +
+                    "Y ${String.format("%.2f", spanY)} m · Z(yükseklik) ${String.format("%.2f", spanZ)} m",
                 style = MaterialTheme.typography.bodySmall
             )
             LegendRow()
@@ -330,8 +348,8 @@ private fun WireFinderScreen(
             Text(
                 if (scanning)
                     "Telefonu duvar üzerinde yavaşça, sabit mesafede gezdirin. Yön seçmenize gerek yok; " +
-                        "uygulama hareketinizi ivmeölçer ve rotasyon sensörüyle otomatik izler. Kırmızı bölgeler " +
-                        "daha güçlü manyetik anomalileri gösterir."
+                        "uygulama hareketinizi X (yatay), Y (yatay) ve Z (yükseklik) eksenlerinde ivmeölçer ve " +
+                        "rotasyon sensörüyle otomatik izler. Kırmızı bölgeler daha güçlü manyetik anomalileri gösterir."
                 else
                     "Önce Referans Al'a basın, sonra Duvarı Tara ile taramayı başlatın.",
                 style = MaterialTheme.typography.bodySmall
@@ -424,83 +442,129 @@ private fun heatColor(t: Float): Color {
 }
 
 @Composable
-private fun WallScanMap(
+private fun Scan3DMap(
     points: List<MainActivity.ScanPoint>,
     minX: Float, maxX: Float,
     minY: Float, maxY: Float,
+    minZ: Float, maxZ: Float,
     modifier: Modifier = Modifier
 ) {
+    // İzometrik projeksiyon: dünya çerçevesindeki (x=Doğu, y=Kuzey, z=Yukarı) 3B konumu
+    // 2B ekrana klasik 30 derecelik izometrik açıyla düşürür. Böylece tarama sadece
+    // düz bir düzlem değil, gerçek bir XYZ hacmi olarak görünür.
+    val cos30 = 0.8660254f
+    val sin30 = 0.5f
+
     Canvas(modifier) {
         try {
-            val cols = 12
-            val rows = 8
-            for (c in 0..cols) {
-                val xx = size.width * c / cols
-                drawLine(Color.LightGray, Offset(xx, 0f), Offset(xx, size.height), 1f)
-            }
-            for (r in 0..rows) {
-                val yy = size.height * r / rows
-                drawLine(Color.LightGray, Offset(0f, yy), Offset(size.width, yy), 1f)
-            }
-
             // Yalnızca geçerli (NaN/sonsuz olmayan) noktaları kullan.
-            val safePoints = points.filter { it.x.isFinite() && it.y.isFinite() && it.intensity.isFinite() }
-            if (safePoints.isEmpty()) return@Canvas
+            val safePoints = points.filter {
+                it.x.isFinite() && it.y.isFinite() && it.z.isFinite() && it.intensity.isFinite()
+            }
 
-            // Gerçek fiziksel oranları bozmamak için X ve Y aynı ölçek faktörüyle çizilir
-            // (aksi halde dikdörtgen bir canvas, gezdiğiniz rotayı esnetip yanlış bir şekle sokar).
+            // Gerçek fiziksel oranları bozmamak için X, Y, Z aynı tek ölçek faktörüyle çizilir.
             val rangeX = (maxX - minX).coerceAtLeast(0.3f)
             val rangeY = (maxY - minY).coerceAtLeast(0.3f)
-            val uniformRange = maxOf(rangeX, rangeY)
+            val rangeZ = (maxZ - minZ).coerceAtLeast(0.3f)
+            val uniformRange = maxOf(rangeX, rangeY, rangeZ)
             val midX = (minX + maxX) / 2f
             val midY = (minY + maxY) / 2f
-            val effMinX = midX - uniformRange / 2f
-            val effMinY = midY - uniformRange / 2f
+            val midZ = (minZ + maxZ) / 2f
+
+            fun iso(px: Float, py: Float, pz: Float): Offset {
+                val x = (px - midX) / uniformRange
+                val y = (py - midY) / uniformRange
+                val z = (pz - midZ) / uniformRange
+                val ix = (x - y) * cos30
+                val iy = (x + y) * sin30 - z
+                return Offset(ix, iy)
+            }
+
+            // Tüm sahneyi (zemin ızgarası + iz) ortak bir izometrik uzayda hesaplayıp
+            // sonra ekrana ölçekleyeceğiz; önce ölçeği belirlemek için zeminin köşelerini kullan.
+            val half = 0.62f
+            val gridCorners = listOf(
+                iso(midX - uniformRange * half, midY - uniformRange * half, midZ - uniformRange * half),
+                iso(midX + uniformRange * half, midY - uniformRange * half, midZ - uniformRange * half),
+                iso(midX + uniformRange * half, midY + uniformRange * half, midZ - uniformRange * half),
+                iso(midX - uniformRange * half, midY + uniformRange * half, midZ - uniformRange * half),
+                iso(midX - uniformRange * half, midY - uniformRange * half, midZ + uniformRange * half),
+                iso(midX + uniformRange * half, midY + uniformRange * half, midZ + uniformRange * half)
+            )
+            val isoMinX = gridCorners.minOf { it.x }
+            val isoMaxX = gridCorners.maxOf { it.x }
+            val isoMinY = gridCorners.minOf { it.y }
+            val isoMaxY = gridCorners.maxOf { it.y }
+            val isoW = (isoMaxX - isoMinX).coerceAtLeast(0.001f)
+            val isoH = (isoMaxY - isoMinY).coerceAtLeast(0.001f)
+
+            val margin = 0.08f
+            val usable = 1f - 2 * margin
+            val scale = minOf(size.width * usable / isoW, size.height * usable / isoH)
+            val cx = size.width / 2f
+            val cy = size.height / 2f
+            val isoCx = (isoMinX + isoMaxX) / 2f
+            val isoCy = (isoMinY + isoMaxY) / 2f
+
+            fun toScreen(p: Offset): Offset =
+                Offset(cx + (p.x - isoCx) * scale, cy + (p.y - isoCy) * scale)
+
+            fun projectPoint(px: Float, py: Float, pz: Float): Offset = toScreen(iso(px, py, pz))
+
+            // --- Zemin ızgarası (X-Y düzlemi), tarama hacminin tabanını temsil eder ---
+            val gridSteps = 6
+            val gridColor = Color(0xFFB0BEC5)
+            for (i in 0..gridSteps) {
+                val t = -half + (i.toFloat() / gridSteps) * (2 * half)
+                val a = projectPoint(midX + t * uniformRange, midY - half * uniformRange, midZ - half * uniformRange)
+                val b = projectPoint(midX + t * uniformRange, midY + half * uniformRange, midZ - half * uniformRange)
+                drawLine(gridColor, a, b, 1.2f)
+                val c = projectPoint(midX - half * uniformRange, midY + t * uniformRange, midZ - half * uniformRange)
+                val d = projectPoint(midX + half * uniformRange, midY + t * uniformRange, midZ - half * uniformRange)
+                drawLine(gridColor, c, d, 1.2f)
+            }
+
+            // --- Eksen göstergesi (X kırmızımsı, Y yeşilimsi, Z mavi) sol altta küçük bir gizmo ---
+            val originScreen = projectPoint(midX - half * uniformRange, midY - half * uniformRange, midZ - half * uniformRange)
+            val axisLen = uniformRange * 0.22f
+            val xAxisEnd = projectPoint(midX - half * uniformRange + axisLen, midY - half * uniformRange, midZ - half * uniformRange)
+            val yAxisEnd = projectPoint(midX - half * uniformRange, midY - half * uniformRange + axisLen, midZ - half * uniformRange)
+            val zAxisEnd = projectPoint(midX - half * uniformRange, midY - half * uniformRange, midZ - half * uniformRange + axisLen)
+            drawLine(Color(0xFFE57373), originScreen, xAxisEnd, 3f)
+            drawLine(Color(0xFF81C784), originScreen, yAxisEnd, 3f)
+            drawLine(Color(0xFF64B5F6), originScreen, zAxisEnd, 3f)
+
+            if (safePoints.isEmpty()) return@Canvas
 
             val intensities = safePoints.map { it.intensity }
             val iMin = intensities.minOrNull() ?: 0f
             val iRange = ((intensities.maxOrNull() ?: 1f) - iMin).coerceAtLeast(1f)
 
-            // Merkezi koru: harita alanının %88'ini kullan, kenarda boşluk bırak
-            val margin = 0.06f
-            val usable = 1f - 2 * margin
-            // Canvas kare olmayabilir; kısa kenara göre kareye oturt ki gerçek oranlar korunsun.
-            val squareSide = minOf(size.width, size.height) * usable
-            val offsetX = (size.width - squareSide) / 2f
-            val offsetY = (size.height - squareSide) / 2f
-
-            fun toOffset(p: MainActivity.ScanPoint): Offset {
-                val nx = (p.x - effMinX) / uniformRange
-                val ny = (p.y - effMinY) / uniformRange
-                return Offset(offsetX + nx * squareSide, offsetY + ny * squareSide)
-            }
+            fun screenOf(p: MainActivity.ScanPoint) = projectPoint(p.x, p.y, p.z)
             fun colorFor(p: MainActivity.ScanPoint): Color {
                 val n = ((p.intensity - iMin) / iRange).coerceIn(0f, 1f)
                 return heatColor(n)
             }
 
-            // Telefonu gezdirdiğiniz rotayı, o andaki manyetik değişime göre renklendirilmiş
-            // kalın bir iz olarak çiz — böylece duvarın hangi bölgesinden geçildiği ve
-            // orada ölçülen değer birlikte görünür.
-            val trailWidth = 22f
+            // Telefonu gezdirdiğiniz rotayı, XYZ uzayında, o andaki manyetik değişime göre
+            // renklendirilmiş bir iz olarak çiz — duvarın hangi bölgesinden (yatay ve dikey
+            // konumuyla birlikte) geçildiği görünür.
+            val trailWidth = 16f
             for (i in 1 until safePoints.size) {
-                val prev = safePoints[i - 1]
-                val cur = safePoints[i]
                 drawLine(
-                    color = colorFor(cur),
-                    start = toOffset(prev),
-                    end = toOffset(cur),
+                    color = colorFor(safePoints[i]),
+                    start = screenOf(safePoints[i - 1]),
+                    end = screenOf(safePoints[i]),
                     strokeWidth = trailWidth,
                     cap = StrokeCap.Round
                 )
             }
 
-            // Başlangıç noktasını mavi bir işaretle, en son (güncel) konumu beyaz halkayla vurgula
-            drawCircle(color = Color(0xFF1565C0), radius = trailWidth * 0.5f, center = toOffset(safePoints.first()))
+            drawCircle(color = Color(0xFF1565C0), radius = trailWidth * 0.55f, center = screenOf(safePoints.first()))
             if (safePoints.size > 1) {
-                val last = toOffset(safePoints.last())
-                drawCircle(color = Color.White, radius = trailWidth * 0.55f, center = last, style = Stroke(width = 4f))
-                drawCircle(color = colorFor(safePoints.last()), radius = trailWidth * 0.4f, center = last)
+                val last = screenOf(safePoints.last())
+                drawCircle(color = Color.White, radius = trailWidth * 0.6f, center = last, style = Stroke(width = 4f))
+                drawCircle(color = colorFor(safePoints.last()), radius = trailWidth * 0.45f, center = last)
             }
         } catch (_: Exception) {
             // Beklenmeyen bir çizim hatası uygulamayı çökertmesin; bu kare atlanır.

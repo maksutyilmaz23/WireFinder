@@ -12,8 +12,8 @@ android {
         applicationId = "com.mesut.wirefinder"
         minSdk = 23
         targetSdk = 35
-        versionCode = 3
-        versionName = "4.3"
+        versionCode = 4
+        versionName = "5.0"
     }
 
     buildFeatures {
