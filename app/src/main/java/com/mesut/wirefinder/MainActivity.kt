@@ -8,9 +8,11 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -53,11 +55,11 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private var scanPointCount by mutableStateOf(0)
     private var scanElapsedMs by mutableStateOf(0L)
     private var scanStartMs = 0L
-    private var scanMinX = 0f
-    private var scanMaxX = 0f
-    private var scanMinY = 0f
-    private var scanMaxY = 0f
-    private var scanPeak = 0f
+    private var scanMinX by mutableStateOf(0f)
+    private var scanMaxX by mutableStateOf(0f)
+    private var scanMinY by mutableStateOf(0f)
+    private var scanMaxY by mutableStateOf(0f)
+    private var scanPeak by mutableStateOf(0f)
 
     data class ScanPoint(val x: Float, val y: Float, val intensity: Float)
 
@@ -130,10 +132,14 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     }
 
     override fun onSensorChanged(event: SensorEvent) {
-        when (event.sensor.type) {
-            Sensor.TYPE_MAGNETIC_FIELD -> handleMagnetometer(event)
-            Sensor.TYPE_ROTATION_VECTOR -> handleRotationVector(event)
-            Sensor.TYPE_LINEAR_ACCELERATION -> handleLinearAcceleration(event)
+        try {
+            when (event.sensor.type) {
+                Sensor.TYPE_MAGNETIC_FIELD -> handleMagnetometer(event)
+                Sensor.TYPE_ROTATION_VECTOR -> handleRotationVector(event)
+                Sensor.TYPE_LINEAR_ACCELERATION -> handleLinearAcceleration(event)
+            }
+        } catch (_: Exception) {
+            // Beklenmeyen bir sensör hatası uygulamayı çökertmesin.
         }
     }
 
@@ -157,7 +163,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         samples.add(b)
         if (samples.size > 100) samples.removeAt(0)
 
-        if (scanning && base != null) {
+        if (scanning && base != null && posX.isFinite() && posY.isFinite()) {
             scanPeak = maxOf(scanPeak, intensity)
             scanPointCount = scanPoints.size + 1
             scanElapsedMs = System.currentTimeMillis() - scanStartMs
@@ -195,6 +201,8 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         val ax = rotationMatrix[0] * event.values[0] + rotationMatrix[1] * event.values[1] + rotationMatrix[2] * event.values[2]
         val ay = rotationMatrix[3] * event.values[0] + rotationMatrix[4] * event.values[1] + rotationMatrix[5] * event.values[2]
 
+        if (!ax.isFinite() || !ay.isFinite()) return
+
         val accelMag = sqrt(ax * ax + ay * ay)
         accelMagWindow.addLast(accelMag)
         if (accelMagWindow.size > 12) accelMagWindow.removeFirst()
@@ -216,6 +224,12 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         velY += ay * dt
         posX += velX * dt
         posY += velY * dt
+
+        // Savunma: herhangi bir sayısal bozulma (NaN/sonsuz) konum takibini kalıcı olarak
+        // bozmasın diye anında sıfırlanır.
+        if (!posX.isFinite() || !posY.isFinite() || !velX.isFinite() || !velY.isFinite()) {
+            posX = 0f; posY = 0f; velX = 0f; velY = 0f
+        }
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
@@ -302,6 +316,13 @@ private fun WireFinderScreen(
                 minY = scanMinY, maxY = scanMaxY,
                 modifier = Modifier.fillMaxWidth().height(240.dp)
             )
+            val spanX = scanMaxX - scanMinX
+            val spanY = scanMaxY - scanMinY
+            Text(
+                "Taranan alan (yaklaşık): ${String.format("%.2f", spanX)} m × ${String.format("%.2f", spanY)} m",
+                style = MaterialTheme.typography.bodySmall
+            )
+            LegendRow()
 
             Text("Toplanan nokta: $scanPointCount   Süre: ${scanElapsedMs / 1000}s")
             Text("Tarama boyunca en yüksek değişim: ${String.format("%.2f", scanPeak)} µT")
@@ -330,6 +351,32 @@ private fun WireFinderScreen(
                 style = MaterialTheme.typography.bodySmall
             )
         }
+    }
+}
+
+@Composable
+private fun LegendRow() {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        LegendChip(Color(0xFF2E7D32), "Düşük")
+        LegendChip(Color(0xFFC0CA33), "Orta")
+        LegendChip(Color(0xFFFF9800), "Yüksek")
+        LegendChip(Color(0xFFD32F2F), "Olası kablo")
+    }
+}
+
+@Composable
+private fun LegendChip(color: Color, label: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            modifier = Modifier
+                .size(12.dp)
+                .background(color, shape = androidx.compose.foundation.shape.CircleShape)
+        )
+        Spacer(modifier = Modifier.width(4.dp))
+        Text(label, style = MaterialTheme.typography.labelSmall)
     }
 }
 
@@ -384,64 +431,79 @@ private fun WallScanMap(
     modifier: Modifier = Modifier
 ) {
     Canvas(modifier) {
-        val cols = 12
-        val rows = 8
-        for (c in 0..cols) {
-            val xx = size.width * c / cols
-            drawLine(Color.LightGray, Offset(xx, 0f), Offset(xx, size.height), 1f)
-        }
-        for (r in 0..rows) {
-            val yy = size.height * r / rows
-            drawLine(Color.LightGray, Offset(0f, yy), Offset(size.width, yy), 1f)
-        }
+        try {
+            val cols = 12
+            val rows = 8
+            for (c in 0..cols) {
+                val xx = size.width * c / cols
+                drawLine(Color.LightGray, Offset(xx, 0f), Offset(xx, size.height), 1f)
+            }
+            for (r in 0..rows) {
+                val yy = size.height * r / rows
+                drawLine(Color.LightGray, Offset(0f, yy), Offset(size.width, yy), 1f)
+            }
 
-        if (points.isEmpty()) return@Canvas
+            // Yalnızca geçerli (NaN/sonsuz olmayan) noktaları kullan.
+            val safePoints = points.filter { it.x.isFinite() && it.y.isFinite() && it.intensity.isFinite() }
+            if (safePoints.isEmpty()) return@Canvas
 
-        // Toplanan konumlara göre otomatik ölçekleme; en az 0.3m aralık varsay (bölme hatasını önler)
-        val rangeX = (maxX - minX).coerceAtLeast(0.3f)
-        val rangeY = (maxY - minY).coerceAtLeast(0.3f)
-        val intensities = points.map { it.intensity }
-        val iMin = intensities.minOrNull() ?: 0f
-        val iRange = ((intensities.maxOrNull() ?: 1f) - iMin).coerceAtLeast(1f)
+            // Gerçek fiziksel oranları bozmamak için X ve Y aynı ölçek faktörüyle çizilir
+            // (aksi halde dikdörtgen bir canvas, gezdiğiniz rotayı esnetip yanlış bir şekle sokar).
+            val rangeX = (maxX - minX).coerceAtLeast(0.3f)
+            val rangeY = (maxY - minY).coerceAtLeast(0.3f)
+            val uniformRange = maxOf(rangeX, rangeY)
+            val midX = (minX + maxX) / 2f
+            val midY = (minY + maxY) / 2f
+            val effMinX = midX - uniformRange / 2f
+            val effMinY = midY - uniformRange / 2f
 
-        // Merkezi koru: harita alanının %90'ını kullan, kenarda boşluk bırak
-        val margin = 0.05f
-        fun toOffset(p: MainActivity.ScanPoint): Offset {
-            val nx = (p.x - minX) / rangeX
-            val ny = (p.y - minY) / rangeY
-            val px = (margin + nx * (1f - 2 * margin)) * size.width
-            val py = (margin + ny * (1f - 2 * margin)) * size.height
-            return Offset(px, py)
-        }
-        fun colorFor(p: MainActivity.ScanPoint): Color {
-            val n = ((p.intensity - iMin) / iRange).coerceIn(0f, 1f)
-            return heatColor(n)
-        }
+            val intensities = safePoints.map { it.intensity }
+            val iMin = intensities.minOrNull() ?: 0f
+            val iRange = ((intensities.maxOrNull() ?: 1f) - iMin).coerceAtLeast(1f)
 
-        // Telefonu gezdirdiğiniz rotayı, o andaki manyetik değişime göre renklendirilmiş
-        // kalın bir iz olarak çiz — böylece duvarın hangi bölgesinden geçildiği ve
-        // orada ölçülen değer birlikte görünür.
-        val trailWidth = 22f
-        for (i in 1 until points.size) {
-            val prev = points[i - 1]
-            val cur = points[i]
-            drawLine(
-                color = colorFor(cur),
-                start = toOffset(prev),
-                end = toOffset(cur),
-                strokeWidth = trailWidth,
-                cap = StrokeCap.Round
-            )
-        }
+            // Merkezi koru: harita alanının %88'ini kullan, kenarda boşluk bırak
+            val margin = 0.06f
+            val usable = 1f - 2 * margin
+            // Canvas kare olmayabilir; kısa kenara göre kareye oturt ki gerçek oranlar korunsun.
+            val squareSide = minOf(size.width, size.height) * usable
+            val offsetX = (size.width - squareSide) / 2f
+            val offsetY = (size.height - squareSide) / 2f
 
-        // Başlangıç noktasını mavi bir işaretle, en son (güncel) konumu beyaz halkayla vurgula
-        if (points.isNotEmpty()) {
-            drawCircle(color = Color(0xFF1565C0), radius = trailWidth * 0.5f, center = toOffset(points.first()))
-        }
-        if (points.size > 1) {
-            val last = toOffset(points.last())
-            drawCircle(color = Color.White, radius = trailWidth * 0.55f, center = last, style = Stroke(width = 4f))
-            drawCircle(color = colorFor(points.last()), radius = trailWidth * 0.4f, center = last)
+            fun toOffset(p: MainActivity.ScanPoint): Offset {
+                val nx = (p.x - effMinX) / uniformRange
+                val ny = (p.y - effMinY) / uniformRange
+                return Offset(offsetX + nx * squareSide, offsetY + ny * squareSide)
+            }
+            fun colorFor(p: MainActivity.ScanPoint): Color {
+                val n = ((p.intensity - iMin) / iRange).coerceIn(0f, 1f)
+                return heatColor(n)
+            }
+
+            // Telefonu gezdirdiğiniz rotayı, o andaki manyetik değişime göre renklendirilmiş
+            // kalın bir iz olarak çiz — böylece duvarın hangi bölgesinden geçildiği ve
+            // orada ölçülen değer birlikte görünür.
+            val trailWidth = 22f
+            for (i in 1 until safePoints.size) {
+                val prev = safePoints[i - 1]
+                val cur = safePoints[i]
+                drawLine(
+                    color = colorFor(cur),
+                    start = toOffset(prev),
+                    end = toOffset(cur),
+                    strokeWidth = trailWidth,
+                    cap = StrokeCap.Round
+                )
+            }
+
+            // Başlangıç noktasını mavi bir işaretle, en son (güncel) konumu beyaz halkayla vurgula
+            drawCircle(color = Color(0xFF1565C0), radius = trailWidth * 0.5f, center = toOffset(safePoints.first()))
+            if (safePoints.size > 1) {
+                val last = toOffset(safePoints.last())
+                drawCircle(color = Color.White, radius = trailWidth * 0.55f, center = last, style = Stroke(width = 4f))
+                drawCircle(color = colorFor(safePoints.last()), radius = trailWidth * 0.4f, center = last)
+            }
+        } catch (_: Exception) {
+            // Beklenmeyen bir çizim hatası uygulamayı çökertmesin; bu kare atlanır.
         }
     }
 }
